@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Chagres Home Center · Control de Entregas</title>
+
+<!-- React (sin necesidad de instalar nada) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Para exportar a Excel -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<!-- Firebase: aquí se guardan los datos compartidos entre computadoras -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+
+<style>
+  body { margin: 0; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // =====================================================================
+  // 1) PEGA AQUÍ TU CONFIGURACIÓN DE FIREBASE
+  //    (la sacas gratis en https://console.firebase.google.com)
+  // =====================================================================
+  const firebaseConfig = {
+    apiKey: "PON_AQUI_TU_API_KEY",
+    authDomain: "PON_AQUI_TU_PROYECTO.firebaseapp.com",
+    projectId: "PON_AQUI_TU_PROYECTO",
+    storageBucket: "PON_AQUI_TU_PROYECTO.appspot.com",
+    messagingSenderId: "000000000000",
+    appId: "PON_AQUI_TU_APP_ID"
+  };
+
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.firestore();
+  const COLECCION = "chagres_datos"; // no hace falta crearla, Firebase la crea sola
+
+  async function storageGet(key) {
+    const doc = await db.collection(COLECCION).doc(key).get();
+    if (!doc.exists) return null;
+    return { value: doc.data().value };
+  }
+  async function storageSet(key, value) {
+    await db.collection(COLECCION).doc(key).set({ value });
+    return { value };
+  }
+</script>
+
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useMemo, useRef } = React;
+
+
+const CHOFER_SUGERIDOS = ["JOVANI ARAUZ", "GREGORIO ROBLES"];
+const STORAGE_KEY = "entregas_lista";
+const REF_KEY = "listas_referencia";
+
+function nowParts() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return {
+    fecha: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    hora: d.toLocaleTimeString("es-PA", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    ts: d.getTime(),
+  };
+}
+
+// El "día de ventas" se reinicia a medianoche (12:00 AM), como un día calendario normal.
+function diaVentaDe(ts) {
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function money(n) {
+  return "B/. " + (Number(n) || 0).toLocaleString("es-PA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function up(s) {
+  return (s || "").toUpperCase();
+}
+
+function addUnique(list, value) {
+  const v = up(value).trim();
+  if (!v) return list;
+  if (list.some((x) => up(x) === v)) return list;
+  return [...list, v];
+}
+
+const COLORS = {
+  bg: "#EDEAE2",
+  surface: "#FFFFFF",
+  ink: "#1F2530",
+  inkSoft: "#5B6270",
+  rust: "#C15A2C",
+  teal: "#2E6B62",
+  tealBg: "#E4EEEC",
+  border: "#D8D3C4",
+  paid: "#2E6B62",
+  paidBg: "#E1EFEA",
+  due: "#B23A2E",
+  dueBg: "#F6E4E0",
+};
+
+function SuggestInput({ value, onChange, options, placeholder, inputStyle }) {
+  const [open, setOpen] = useState(false);
+  const opts = (options || []).filter((o) => !value || o.toUpperCase().includes(value.toUpperCase())).slice(0, 8);
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        style={{ ...inputStyle, textTransform: "uppercase" }}
+        value={value}
+        onChange={(e) => { onChange(e.target.value.toUpperCase()); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder={placeholder}
+        autoComplete="off"
+      />
+      {open && opts.length > 0 && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 2px)", left: 0, right: 0, zIndex: 30,
+          background: "#FFFFFF", border: `1px solid ${COLORS.border}`, borderRadius: 4,
+          boxShadow: "0 6px 16px rgba(0,0,0,0.12)", maxHeight: 180, overflowY: "auto",
+        }}>
+          {opts.map((opt) => (
+            <div
+              key={opt}
+              onMouseDown={() => { onChange(opt); setOpen(false); }}
+              style={{ padding: "8px 10px", fontSize: 13, color: COLORS.ink, cursor: "pointer", background: "#FFFFFF" }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.tealBg)}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "#FFFFFF")}
+            >
+              {opt}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const mono = { fontFamily: "Consolas, 'SF Mono', 'Courier New', monospace" };
+
+function App() {
+  const [items, setItems] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  const [toast, setToast] = useState("");
+  const toastTimer = useRef(null);
+  const [crashError, setCrashError] = useState("");
+
+  const [form, setForm] = useState({
+    cliente: "", direccion: "", monto: "", factura: "", chofer: "", estado: "Factura por Cobrar",
+  });
+
+  const [fMes, setFMes] = useState(new Date().getMonth() + 1);
+  const [fAnio, setFAnio] = useState(new Date().getFullYear());
+  const [modoFiltro, setModoFiltro] = useState("mes"); // "mes" | "dia"
+  const [fDia, setFDia] = useState(diaVentaDe(Date.now()));
+  const [formError, setFormError] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [refLists, setRefLists] = useState({ clientes: [], direcciones: [], choferes: CHOFER_SUGERIDOS });
+  const [nuevoChofer, setNuevoChofer] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [mostrarChoferes, setMostrarChoferes] = useState(false);
+  const [reportsVisible, setReportsVisible] = useState(true);
+  const [showPwPrompt, setShowPwPrompt] = useState(false);
+  const [pwInput, setPwInput] = useState("");
+  const [pwError, setPwError] = useState("");
+  const REPORTS_PASSWORD = "12345";
+  const WIPE_PASSWORD = "54321";
+  const [showWipePwPrompt, setShowWipePwPrompt] = useState(false);
+  const [wipePwInput, setWipePwInput] = useState("");
+  const [wipePwError, setWipePwError] = useState("");
+  const [confirmModal, setConfirmModal] = useState(null); // {message, onYes}
+  const [promptModal, setPromptModal] = useState(null); // {message, value, onYes}
+  const [busqueda, setBusqueda] = useState("");
+
+  useEffect(() => {
+    function onWinError(ev) {
+      setCrashError((ev?.error?.message) || ev?.message || "Error desconocido en la página.");
+    }
+    window.addEventListener("error", onWinError);
+    window.addEventListener("unhandledrejection", (ev) => {
+      setCrashError("Promesa fallida: " + (ev?.reason?.message || String(ev?.reason)));
+    });
+    return () => window.removeEventListener("error", onWinError);
+  }, []);
+
+  const [refrescando, setRefrescando] = useState(false);
+
+  async function cargarDatos() {
+    try {
+      const res = await storageGet(STORAGE_KEY);
+      setItems(res ? JSON.parse(res.value) : []);
+    } catch (err) {
+      setItems((prev) => prev || []);
+    }
+    try {
+      const res2 = await storageGet(REF_KEY);
+      if (res2) {
+        const parsed = JSON.parse(res2.value);
+        setRefLists({
+          clientes: parsed.clientes || [],
+          direcciones: parsed.direcciones || [],
+          choferes: parsed.choferes && parsed.choferes.length ? parsed.choferes : CHOFER_SUGERIDOS,
+        });
+      }
+    } catch (err) {
+      // se queda con los valores actuales
+    }
+  }
+
+  async function refrescarManual() {
+    setRefrescando(true);
+    await cargarDatos();
+    setRefrescando(false);
+    showToast("Datos actualizados.");
+  }
+
+  useEffect(() => {
+    (async () => {
+      await cargarDatos();
+      setLoaded(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    const intervalo = setInterval(() => {
+      cargarDatos();
+    }, 30000);
+    return () => clearInterval(intervalo);
+  }, []);
+
+  async function persistRefLists(next) {
+    setRefLists(next);
+    try {
+      await storageSet(REF_KEY, JSON.stringify(next));
+    } catch (err) {
+      // no bloquea el uso local
+    }
+  }
+
+  function agregarChoferNuevo() {
+    const v = up(nuevoChofer).trim();
+    if (!v) return;
+    if (refLists.choferes.some((c) => up(c) === v)) {
+      setNuevoChofer("");
+      return;
+    }
+    persistRefLists({ ...refLists, choferes: [...refLists.choferes, v] });
+    setNuevoChofer("");
+    showToast("Chofer agregado.");
+  }
+
+  function editarChofer(nombreActual) {
+    setPromptModal({
+      message: "Nuevo nombre para el chofer:",
+      value: nombreActual,
+      onYes: (nuevo) => {
+        const nuevoU = up(nuevo).trim();
+        if (!nuevoU) return;
+        const nuevaLista = refLists.choferes.map((c) => (c === nombreActual ? nuevoU : c));
+        persistRefLists({ ...refLists, choferes: nuevaLista });
+        if (form.chofer === nombreActual) setForm((f) => ({ ...f, chofer: nuevoU }));
+        showToast("Chofer actualizado. Los registros ya guardados con el nombre anterior no cambian.");
+      },
+    });
+  }
+
+  function eliminarChofer(nombre) {
+    setConfirmModal({
+      message: `¿Quitar a "${nombre}" de la lista de choferes activos?\n\nLos registros ya guardados con su nombre no se modifican, solo dejará de aparecer como sugerencia para entregas nuevas.`,
+      onYes: () => {
+        persistRefLists({ ...refLists, choferes: refLists.choferes.filter((c) => c !== nombre) });
+      },
+    });
+  }
+
+  function handleToggleReports() {
+    if (reportsVisible) {
+      setReportsVisible(false);
+    } else {
+      setPwInput("");
+      setPwError("");
+      setShowPwPrompt(true);
+    }
+  }
+
+  function confirmPassword() {
+    if (pwInput === REPORTS_PASSWORD) {
+      setReportsVisible(true);
+      setShowPwPrompt(false);
+      setPwInput("");
+      setPwError("");
+    } else {
+      setPwError("Contraseña incorrecta.");
+    }
+  }
+
+  function abrirBorrarTodo() {
+    setWipePwInput("");
+    setWipePwError("");
+    setShowWipePwPrompt(true);
+  }
+
+  function confirmarWipePassword() {
+    if (wipePwInput !== WIPE_PASSWORD) {
+      setWipePwError("Contraseña incorrecta.");
+      return;
+    }
+    setShowWipePwPrompt(false);
+    setWipePwInput("");
+    setWipePwError("");
+    setConfirmModal({
+      message: "⚠ Esto eliminará PERMANENTEMENTE todos los registros de entregas guardados hasta ahora.\n\nEsta acción NO se puede deshacer.\n\n¿Deseas continuar?",
+      onYes: () => {
+        persist([]);
+        showToast("Todos los registros fueron eliminados.");
+      },
+    });
+  }
+
+  function showToast(msg) {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 2200);
+  }
+
+  function persist(next) {
+    setItems(next);
+    (async () => {
+      try {
+        await storageSet(STORAGE_KEY, JSON.stringify(next));
+        setSaveError("");
+      } catch (err) {
+        setSaveError("No se pudo guardar en la nube (quedó solo en esta pantalla). " + (err?.message || ""));
+      }
+    })();
+  }
+
+  function addEntry(ev) {
+    try {
+      if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
+      setFormError("");
+      const faltantes = [];
+      if (!form.cliente.trim()) faltantes.push("Cliente");
+      if (!form.monto || Number(form.monto) <= 0) faltantes.push("Monto");
+      if (!form.chofer.trim()) faltantes.push("Chofer");
+      if (faltantes.length) {
+        setFormError("Falta completar: " + faltantes.join(", "));
+        return;
+      }
+      const clienteU = up(form.cliente.trim());
+      const direccionU = up(form.direccion.trim());
+      const choferU = up(form.chofer.trim());
+      const facturaU = up(form.factura.trim());
+
+      if (editingId) {
+        setItems((prev) => {
+          const next = (prev || []).map((it) =>
+            it.id === editingId
+              ? { ...it, cliente: clienteU, direccion: direccionU, monto: parseFloat(form.monto) || 0, factura: facturaU, chofer: choferU, estado: form.estado }
+              : it
+          );
+          persist(next);
+          return next;
+        });
+        setEditingId(null);
+        setForm({ cliente: "", direccion: "", monto: "", factura: "", chofer: "", estado: "Factura por Cobrar" });
+        showToast("Registro actualizado.");
+        return;
+      }
+
+      const { fecha, hora, ts } = nowParts();
+      const entry = {
+        id: Date.now() + "_" + Math.random().toString(36).slice(2, 7),
+        no: (items?.length || 0) + 1,
+        fecha, hora, ts,
+        cliente: clienteU,
+        direccion: direccionU,
+        monto: parseFloat(form.monto) || 0,
+        factura: facturaU,
+        chofer: choferU,
+        estado: form.estado,
+        finalizado: false,
+        horaFinal: "", fechaFinal: "",
+      };
+      setItems((prev) => {
+        const next = [entry, ...(prev || [])];
+        persist(next);
+        return next;
+      });
+      const nextRef = {
+        clientes: addUnique(refLists.clientes, clienteU),
+        direcciones: addUnique(refLists.direcciones, direccionU),
+        choferes: addUnique(refLists.choferes, choferU),
+      };
+      if (nextRef.clientes !== refLists.clientes || nextRef.direcciones !== refLists.direcciones || nextRef.choferes !== refLists.choferes) {
+        persistRefLists(nextRef);
+      }
+      setForm({ cliente: "", direccion: "", monto: "", factura: "", chofer: choferU, estado: "Factura por Cobrar" });
+      showToast("Entrega registrada.");
+    } catch (err) {
+      setCrashError("Error al agregar: " + (err?.message || String(err)));
+    }
+  }
+
+  function startEdit(it) {
+    setEditingId(it.id);
+    setForm({
+      cliente: it.cliente, direccion: it.direccion, monto: String(it.monto),
+      factura: it.factura, chofer: it.chofer, estado: it.estado,
+    });
+    setFormError("");
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setForm({ cliente: "", direccion: "", monto: "", factura: "", chofer: "", estado: "Factura por Cobrar" });
+    setFormError("");
+  }
+
+  function toggleFinal(id) {
+    const next = (items || []).map((it) => {
+      if (it.id !== id) return it;
+      if (it.finalizado) return { ...it, finalizado: false, horaFinal: "", fechaFinal: "" };
+      const { fecha, hora } = nowParts();
+      return { ...it, finalizado: true, horaFinal: hora, fechaFinal: fecha };
+    });
+    persist(next);
+  }
+
+  function toggleEstado(id) {
+    const next = (items || []).map((it) => {
+      if (it.id !== id) return it;
+      return { ...it, estado: it.estado === "Factura Pagada" ? "Factura por Cobrar" : "Factura Pagada" };
+    });
+    persist(next);
+  }
+
+  function removeEntry(id) {
+    setConfirmModal({
+      message: "Este registro se eliminará permanentemente y su monto se descontará del total.\n\n¿Deseas continuar?",
+      onYes: () => {
+        persist((items || []).filter((it) => it.id !== id));
+      },
+    });
+  }
+
+  const choferesActivos = useMemo(() => {
+    return [...(refLists.choferes || [])].sort();
+  }, [refLists.choferes]);
+
+  const filtered = useMemo(() => {
+    const q = busqueda.trim().toUpperCase();
+    if (q) {
+      return (items || [])
+        .filter((it) => it.cliente.includes(q) || it.factura.includes(q))
+        .sort((a, b) => (b.fecha + b.hora).localeCompare(a.fecha + a.hora));
+    }
+    if (modoFiltro === "dia") {
+      return (items || [])
+        .filter((it) => it.fecha === fDia)
+        .sort((a, b) => (b.fecha + b.hora).localeCompare(a.fecha + a.hora));
+    }
+    return (items || [])
+      .filter((it) => {
+        const d = new Date(it.fecha + "T00:00:00");
+        const okMes = d.getMonth() + 1 === Number(fMes);
+        const okAnio = d.getFullYear() === Number(fAnio);
+        return okMes && okAnio;
+      })
+      .sort((a, b) => (b.fecha + b.hora).localeCompare(a.fecha + a.hora));
+  }, [items, fMes, fAnio, busqueda, modoFiltro, fDia]);
+
+  const kpis = useMemo(() => {
+    let facturado = 0, cobrado = 0, porCobrar = 0;
+    filtered.forEach((it) => {
+      facturado += it.monto;
+      if (it.estado === "Factura Pagada") cobrado += it.monto;
+      else porCobrar += it.monto;
+    });
+    return { facturado, cobrado, porCobrar, cantidad: filtered.length };
+  }, [filtered]);
+
+  const hoyISO = diaVentaDe(Date.now());
+  const itemsHoy = useMemo(() => {
+    return (items || [])
+      .filter((it) => diaVentaDe(it.ts || new Date(it.fecha + "T12:00:00").getTime()) === hoyISO)
+      .sort((a, b) => b.hora.localeCompare(a.hora));
+  }, [items, hoyISO]);
+
+  const kpisHoy = useMemo(() => {
+    let facturado = 0, cobrado = 0, porCobrar = 0;
+    itemsHoy.forEach((it) => {
+      facturado += it.monto;
+      if (it.estado === "Factura Pagada") cobrado += it.monto;
+      else porCobrar += it.monto;
+    });
+    return { facturado, cobrado, porCobrar, cantidad: itemsHoy.length };
+  }, [itemsHoy]);
+
+  function exportExcel() {
+    if (filtered.length === 0) { showToast("No hay datos para exportar con este filtro."); return; }
+
+    const periodoLabel = modoFiltro === "dia" ? fDia : `${meses[fMes - 1]} ${fAnio}`;
+
+    const aoaReportes = [
+      ["REPORTE DE VENTAS · CHAGRES HOME CENTER"],
+      [],
+      ["Periodo filtrado:", periodoLabel],
+      [],
+      ["Total Facturado", "Total Cobrado", "Total por Cobrar", "Cantidad de Entregas"],
+      [kpis.facturado, kpis.cobrado, kpis.porCobrar, kpis.cantidad],
+    ];
+    const wsReportes = XLSX.utils.aoa_to_sheet(aoaReportes);
+    wsReportes["!cols"] = [{ wch: 22 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }];
+
+    const rows = filtered.map((it) => ({
+      "No.": it.no, "Fecha": it.fecha, "Cliente": it.cliente, "Direccion": it.direccion,
+      "Monto": it.monto, "#Factura": it.factura, "Chofer": it.chofer, "Estado": it.estado,
+      "Monto por Cobrar": it.estado === "Factura por Cobrar" ? it.monto : 0,
+      "Hora Salida": it.hora, "Finalizado": it.finalizado ? "SI" : "NO",
+      "Hora Final": it.horaFinal, "Fecha Final": it.fechaFinal,
+    }));
+    const wsEntregas = XLSX.utils.json_to_sheet(rows);
+    wsEntregas["!cols"] = [{ wch: 5 }, { wch: 11 }, { wch: 20 }, { wch: 18 }, { wch: 11 }, { wch: 10 }, { wch: 16 }, { wch: 18 }, { wch: 15 }, { wch: 11 }, { wch: 10 }, { wch: 11 }, { wch: 11 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsReportes, "Reportes");
+    XLSX.utils.book_append_sheet(wb, wsEntregas, "Entregas");
+    const nombreArchivo = modoFiltro === "dia" ? `Control_Entregas_${fDia}.xlsx` : `Control_Entregas_${fAnio}_${String(fMes).padStart(2, "0")}.xlsx`;
+    XLSX.writeFile(wb, nombreArchivo);
+    showToast("Reporte descargado.");
+  }
+
+  const meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+  const anioActual = new Date().getFullYear();
+  const anios = [anioActual - 1, anioActual, anioActual + 1];
+
+  const inputStyle = {
+    fontFamily: "inherit", fontSize: 14, padding: "7px 9px",
+    border: `1px solid ${COLORS.border}`, borderRadius: 4, background: "#fff", color: COLORS.ink, width: "100%",
+  };
+  const labelStyle = { fontSize: 11, color: COLORS.inkSoft, marginBottom: 4, display: "block" };
+
+  if (!loaded) {
+    return <div style={{ padding: 40, textAlign: "center", color: COLORS.inkSoft, background: COLORS.bg, minHeight: "100vh" }}>Cargando registro...</div>;
+  }
+
+  return (
+    <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: COLORS.bg, color: COLORS.ink, minHeight: "100%", padding: "20px 16px 60px" }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto" }}>
+
+        {crashError && (
+          <div style={{ background: "#3a1414", color: "#ffb4a8", border: "1px solid #B23A2E", borderRadius: 6, padding: "10px 14px", marginBottom: 14, fontSize: 13, fontFamily: "monospace" }}>
+            ⚠ Error técnico: {crashError}
+          </div>
+        )}
+
+        {/* Masthead */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 10, borderBottom: `3px solid ${COLORS.ink}`, paddingBottom: 14, marginBottom: 18 }}>
+          <div>
+            <h1 style={{ ...mono, fontSize: 22, letterSpacing: 0.5, margin: 0, textTransform: "uppercase" }}>Chagres Home Center</h1>
+            <p style={{ margin: "4px 0 0", color: COLORS.inkSoft, fontSize: 13 }}>Control de entregas</p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <button
+              onClick={refrescarManual}
+              disabled={refrescando}
+              title="Volver a cargar los datos guardados (para ver lo que otros hayan agregado)"
+              style={{
+                display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit", fontSize: 12.5, fontWeight: 600,
+                padding: "6px 12px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: refrescando ? "default" : "pointer",
+                background: "#fff", color: COLORS.ink, opacity: refrescando ? 0.6 : 1,
+              }}
+            >
+              <span style={{ display: "inline-block", transition: "transform 0.5s ease", transform: refrescando ? "rotate(360deg)" : "none" }}>🔄</span>
+              {refrescando ? "Actualizando..." : "Actualizar datos"}
+            </button>
+            <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: COLORS.inkSoft, cursor: "pointer", userSelect: "none" }}>
+              <input type="checkbox" checked={reportsVisible} onChange={handleToggleReports} style={{ width: 15, height: 15, cursor: "pointer", accentColor: COLORS.teal }} />
+              🔒 Ver reportes
+            </label>
+            <span style={{ ...mono, fontSize: 11, color: COLORS.teal, background: COLORS.tealBg, border: `1px solid ${COLORS.teal}`, padding: "3px 8px", borderRadius: 3, whiteSpace: "nowrap" }}>
+              ● auto-actualiza cada 30s
+            </span>
+          </div>
+        </div>
+
+        {showPwPrompt && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 320, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: COLORS.ink }}>🔒 Reportes protegidos</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginBottom: 12 }}>Ingresa la contraseña para ver los reportes.</div>
+              <input
+                type="password"
+                autoFocus
+                value={pwInput}
+                onChange={(e) => { setPwInput(e.target.value); setPwError(""); }}
+                onKeyDown={(e) => { if (e.key === "Enter") confirmPassword(); }}
+                placeholder="Contraseña"
+                style={{ width: "100%", fontSize: 15, padding: "9px 10px", border: `1px solid ${pwError ? COLORS.due : COLORS.border}`, borderRadius: 4, marginBottom: 8, boxSizing: "border-box" }}
+              />
+              {pwError && <div style={{ color: COLORS.due, fontSize: 12, marginBottom: 8 }}>{pwError}</div>}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+                <button onClick={() => setShowPwPrompt(false)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={confirmPassword} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.teal, color: "#fff" }}>Ver reportes</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showWipePwPrompt && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 320, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: COLORS.due }}>⚠ Borrado total</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginBottom: 12 }}>Ingresa la contraseña de administrador para borrar todos los registros.</div>
+              <input
+                type="password"
+                autoFocus
+                value={wipePwInput}
+                onChange={(e) => { setWipePwInput(e.target.value); setWipePwError(""); }}
+                onKeyDown={(e) => { if (e.key === "Enter") confirmarWipePassword(); }}
+                placeholder="Contraseña"
+                style={{ width: "100%", fontSize: 15, padding: "9px 10px", border: `1px solid ${wipePwError ? COLORS.due : COLORS.border}`, borderRadius: 4, marginBottom: 8, boxSizing: "border-box" }}
+              />
+              {wipePwError && <div style={{ color: COLORS.due, fontSize: 12, marginBottom: 8 }}>{wipePwError}</div>}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+                <button onClick={() => setShowWipePwPrompt(false)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={confirmarWipePassword} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.due, color: "#fff" }}>Continuar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {confirmModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 360, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontSize: 13.5, color: COLORS.ink, marginBottom: 16, whiteSpace: "pre-line", lineHeight: 1.5 }}>{confirmModal.message}</div>
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmModal(null)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={() => { confirmModal.onYes(); setConfirmModal(null); }} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.due, color: "#fff" }}>Aceptar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {promptModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 340, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontSize: 13.5, color: COLORS.ink, marginBottom: 10 }}>{promptModal.message}</div>
+              <input
+                autoFocus
+                value={promptModal.value}
+                onChange={(e) => setPromptModal({ ...promptModal, value: e.target.value })}
+                onKeyDown={(e) => { if (e.key === "Enter") { promptModal.onYes(promptModal.value); setPromptModal(null); } }}
+                style={{ width: "100%", fontSize: 14, padding: "8px 10px", border: `1px solid ${COLORS.border}`, borderRadius: 4, marginBottom: 12, boxSizing: "border-box", textTransform: "uppercase" }}
+              />
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button onClick={() => setPromptModal(null)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={() => { promptModal.onYes(promptModal.value); setPromptModal(null); }} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.teal, color: "#fff" }}>Guardar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {reportsVisible && (
+        <>
+        {/* KPIs */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 20 }}>
+          {[
+            { label: "Total facturado", value: kpis.facturado, border: COLORS.rust },
+            { label: "Cobrado", value: kpis.cobrado, border: COLORS.paid },
+            { label: "Por cobrar", value: kpis.porCobrar, border: COLORS.due },
+            { label: "Entregas", value: kpis.cantidad, border: COLORS.ink, raw: true },
+          ].map((k) => (
+            <div key={k.label} style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderLeft: `4px solid ${k.border}`, padding: "12px 14px", borderRadius: 4 }}>
+              <div style={{ fontSize: 11, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.4 }}>{k.label}</div>
+              <div style={{ ...mono, fontSize: 20, fontWeight: 700, marginTop: 4 }}>{k.raw ? k.value : money(k.value)}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Reporte de hoy */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, marginBottom: 18 }}>
+          <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: "0 0 4px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>
+            Reporte de hoy · {hoyISO}
+          </h2>
+          <p style={{ fontSize: 11, color: COLORS.inkSoft, margin: "0 0 12px" }}>El día de ventas se reinicia a medianoche (12:00 AM).</p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+            {[
+              { label: "Facturado hoy", value: kpisHoy.facturado, border: COLORS.rust },
+              { label: "Cobrado hoy", value: kpisHoy.cobrado, border: COLORS.paid },
+              { label: "Por cobrar hoy", value: kpisHoy.porCobrar, border: COLORS.due },
+              { label: "Entregas hoy", value: kpisHoy.cantidad, border: COLORS.ink, raw: true },
+            ].map((k) => (
+              <div key={k.label} style={{ background: COLORS.bg, border: `1px solid ${COLORS.border}`, borderLeft: `4px solid ${k.border}`, padding: "10px 12px", borderRadius: 4 }}>
+                <div style={{ fontSize: 10.5, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.4 }}>{k.label}</div>
+                <div style={{ ...mono, fontSize: 17, fontWeight: 700, marginTop: 3 }}>{k.raw ? k.value : money(k.value)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Filtros */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, marginBottom: 18 }}>
+          <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: "0 0 12px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>Filtrar reporte</h2>
+
+          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+            {[{ v: "mes", label: "Mensual" }, { v: "dia", label: "Por día" }].map((opt) => (
+              <button
+                key={opt.v}
+                onClick={() => setModoFiltro(opt.v)}
+                style={{
+                  fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, padding: "6px 14px", borderRadius: 20, cursor: "pointer",
+                  border: `1px solid ${modoFiltro === opt.v ? COLORS.ink : COLORS.border}`,
+                  background: modoFiltro === opt.v ? COLORS.ink : "transparent",
+                  color: modoFiltro === opt.v ? "#fff" : COLORS.inkSoft,
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+            {modoFiltro === "mes" ? (
+              <>
+                <div>
+                  <label style={labelStyle}>Mes</label>
+                  <select style={inputStyle} value={fMes} onChange={(e) => setFMes(e.target.value)}>
+                    {meses.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={labelStyle}>Año</label>
+                  <select style={inputStyle} value={fAnio} onChange={(e) => setFAnio(e.target.value)}>
+                    {anios.map((a) => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <div>
+                <label style={labelStyle}>Día</label>
+                <input type="date" style={inputStyle} value={fDia} onChange={(e) => setFDia(e.target.value)} />
+              </div>
+            )}
+            <div style={{ flex: 1 }} />
+            <button onClick={exportExcel} style={{ fontFamily: "inherit", fontSize: 14, fontWeight: 600, padding: "9px 16px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.ink, color: "#fff" }}>
+              ⬇ Descargar reporte Excel
+            </button>
+          </div>
+        </div>
+        </>
+        )}
+
+        {/* Formulario */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, marginBottom: 18 }}>
+          <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: "0 0 12px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>
+            {editingId ? "Editar entrega" : "Registrar nueva entrega"}
+          </h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+            <div style={{ gridColumn: "span 2" }}>
+              <label style={labelStyle}>Cliente</label>
+              <SuggestInput value={form.cliente} onChange={(v) => setForm({ ...form, cliente: v })} options={refLists.clientes} placeholder="NOMBRE DEL CLIENTE" inputStyle={inputStyle} />
+            </div>
+            <div style={{ gridColumn: "span 2" }}>
+              <label style={labelStyle}>Dirección</label>
+              <SuggestInput value={form.direccion} onChange={(v) => setForm({ ...form, direccion: v })} options={refLists.direcciones} placeholder="SECTOR / DIRECCIÓN" inputStyle={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Monto (B/.)</label>
+              <input type="number" step="0.01" style={inputStyle} value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="0.00" />
+            </div>
+            <div>
+              <label style={labelStyle}>#Factura</label>
+              <input style={{ ...inputStyle, textTransform: "uppercase" }} value={form.factura} onChange={(e) => setForm({ ...form, factura: up(e.target.value) })} placeholder="20160" />
+            </div>
+            <div>
+              <label style={labelStyle}>Chofer</label>
+              <SuggestInput value={form.chofer} onChange={(v) => setForm({ ...form, chofer: v })} options={choferesActivos} placeholder="NOMBRE" inputStyle={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Estado</label>
+              <select style={inputStyle} value={form.estado} onChange={(e) => setForm({ ...form, estado: e.target.value })}>
+                <option value="Factura por Cobrar">Factura por Cobrar</option>
+                <option value="Factura Pagada">Factura Pagada</option>
+              </select>
+            </div>
+            <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ color: COLORS.due, fontSize: 12.5, fontWeight: 600 }}>{formError}</span>
+              <div style={{ display: "flex", gap: 8 }}>
+                {editingId && (
+                  <button type="button" onClick={cancelEdit} style={{ fontFamily: "inherit", fontSize: 14, fontWeight: 600, padding: "9px 16px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>
+                    Cancelar
+                  </button>
+                )}
+                <button type="button" onClick={addEntry} style={{ fontFamily: "inherit", fontSize: 14, fontWeight: 600, padding: "9px 16px", border: "none", borderRadius: 4, cursor: "pointer", background: editingId ? COLORS.teal : COLORS.rust, color: "#fff" }}>
+                  {editingId ? "Guardar cambios" : "+ Agregar entrega"}
+                </button>
+              </div>
+            </div>
+          </div>
+          {saveError && (
+            <div style={{ marginTop: 10, fontSize: 12.5, color: COLORS.due, background: COLORS.dueBg, border: `1px solid ${COLORS.due}`, borderRadius: 4, padding: "8px 10px" }}>
+              ⚠ {saveError}
+            </div>
+          )}
+
+          <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${COLORS.border}` }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: COLORS.inkSoft, cursor: "pointer", userSelect: "none" }}>
+              <input type="checkbox" checked={mostrarChoferes} onChange={(e) => setMostrarChoferes(e.target.checked)} style={{ width: 15, height: 15, cursor: "pointer", accentColor: COLORS.teal }} />
+              Gestionar choferes (agregar, editar o quitar)
+            </label>
+          </div>
+
+          {mostrarChoferes && (
+            <>
+              <div style={{ marginTop: 10, display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 200px" }}>
+                  <label style={labelStyle}>Agregar chofer nuevo (queda guardado aunque no registres una entrega)</label>
+                  <input
+                    style={{ ...inputStyle, textTransform: "uppercase" }}
+                    value={nuevoChofer}
+                    onChange={(e) => setNuevoChofer(up(e.target.value))}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); agregarChoferNuevo(); } }}
+                    placeholder="NOMBRE DEL CHOFER"
+                  />
+                </div>
+                <button type="button" onClick={agregarChoferNuevo} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.teal, color: "#fff" }}>
+                  + Agregar chofer
+                </button>
+              </div>
+              <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {choferesActivos.map((c) => (
+                  <span key={c} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, padding: "3px 6px 3px 9px", borderRadius: 20, background: COLORS.tealBg, color: COLORS.teal, fontWeight: 600 }}>
+                    {c}
+                    <button type="button" onClick={() => editarChofer(c)} title="Editar nombre" style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.teal, fontSize: 11, padding: 0, lineHeight: 1 }}>✎</button>
+                    <button type="button" onClick={() => eliminarChofer(c)} title="Quitar de la lista" style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.due, fontSize: 12, padding: 0, lineHeight: 1 }}>✕</button>
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Tabla */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>
+            <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: 0, color: COLORS.inkSoft }}>
+              {busqueda.trim()
+                ? `Resultados de búsqueda (${filtered.length})`
+                : modoFiltro === "dia"
+                ? `Entregas del ${fDia} (${filtered.length})`
+                : `Entregas del mes (${filtered.length})`}
+            </h2>
+            <div style={{ position: "relative", width: 260 }}>
+              <input
+                value={busqueda}
+                onChange={(e) => setBusqueda(e.target.value.toUpperCase())}
+                placeholder="🔎 BUSCAR CLIENTE O #FACTURA"
+                style={{ ...inputStyle, textTransform: "uppercase", paddingRight: busqueda ? 30 : 9 }}
+              />
+              {busqueda && (
+                <button
+                  onClick={() => setBusqueda("")}
+                  title="Limpiar búsqueda"
+                  style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 14 }}
+                >✕</button>
+              )}
+            </div>
+          </div>
+          {busqueda.trim() && (
+            <div style={{ fontSize: 11.5, color: COLORS.inkSoft, marginBottom: 10 }}>
+              Buscando en todo el historial (no solo el mes filtrado). Borra la búsqueda para volver al reporte por mes.
+            </div>
+          )}
+          {filtered.length === 0 ? (
+            <div style={{ textAlign: "center", color: COLORS.inkSoft, padding: "30px 0", fontSize: 13 }}>
+              {busqueda.trim() ? "No se encontraron coincidencias." : "No hay entregas registradas con este filtro todavía."}
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr>
+                    {["No.", "Fecha", "Cliente", "Dirección", "Monto", "Factura", "Chofer", "Estado", "Hora", "Finalizado", "Hora final", ""].map((h) => (
+                      <th key={h} style={{ textAlign: "left", fontSize: 11, textTransform: "uppercase", color: COLORS.inkSoft, borderBottom: `2px solid ${COLORS.ink}`, padding: "8px 8px", whiteSpace: "nowrap" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((it) => (
+                    <tr key={it.id}>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.no}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.fecha}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.cliente}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.direccion}</td>
+                      <td style={{ ...mono, textAlign: "right", padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{money(it.monto)}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.factura}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.chofer}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                        <span
+                          onClick={() => toggleEstado(it.id)}
+                          title="Clic para cambiar estado"
+                          style={{
+                            fontSize: 11, padding: "3px 8px", borderRadius: 20, fontWeight: 600, cursor: "pointer", display: "inline-block",
+                            background: it.estado === "Factura Pagada" ? COLORS.paidBg : COLORS.dueBg,
+                            color: it.estado === "Factura Pagada" ? COLORS.paid : COLORS.due,
+                          }}
+                        >
+                          {it.estado}
+                        </span>
+                      </td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.hora}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                        <input type="checkbox" checked={it.finalizado} onChange={() => toggleFinal(it.id)} style={{ width: 17, height: 17, cursor: "pointer", accentColor: COLORS.teal }} />
+                      </td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.finalizado ? `${it.horaFinal} · ${it.fechaFinal}` : "—"}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => startEdit(it)} title="Editar" style={{ background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 14 }}>✎</button>
+                          <button onClick={() => removeEntry(it.id)} title="Eliminar" style={{ background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 15 }}>✕</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Zona de administración */}
+        <div style={{ marginTop: 24, textAlign: "center" }}>
+          <button
+            onClick={abrirBorrarTodo}
+            style={{ fontFamily: "inherit", fontSize: 11.5, color: COLORS.inkSoft, background: "none", border: "none", cursor: "pointer", textDecoration: "underline", opacity: 0.7 }}
+          >
+            ⚠ Zona de administración: borrar todos los registros
+          </button>
+        </div>
+
+        {toast && (
+          <div style={{ position: "fixed", bottom: 18, left: "50%", transform: "translateX(-50%)", background: COLORS.ink, color: "#fff", padding: "9px 16px", borderRadius: 5, fontSize: 13, zIndex: 50 }}>
+            {toast}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+<script>
+  // Transformamos el código de arriba nosotros mismos, forzando el modo
+  // "clásico" de React (sin el import automático que rompe en el navegador).
+  (function () {
+    var source = document.getElementById("app-source").textContent;
+    var output = Babel.transform(source, {
+      presets: [["react", { runtime: "classic" }]],
+    }).code;
+    var script = document.createElement("script");
+    script.textContent = output;
+    document.body.appendChild(script);
+  })();
+</script>
+</body>
+</html>
